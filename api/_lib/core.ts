@@ -74,9 +74,9 @@ const DEFAULT_MODELS = [
   'gemini-3.1-flash-lite',
   'gemini-3.6-flash',
 ];
-// Busy models usually answer 503 within a second or two; a slow one gets cut off so we move on.
-const PER_MODEL_TIMEOUT_MS = 9000;
-const TOTAL_BUDGET_MS = 45000;
+// Busy models answer 503 within a second or two; lite models can need ~10-15s for the full prompt.
+const PER_MODEL_TIMEOUT_MS = 20000;
+const TOTAL_BUDGET_MS = 52000;
 
 // Helper: Try calling Gemini with model fallback and proper timeout management
 async function callGeminiWithFallback(promptText: string, diag: GeminiDiag = { errors: [] }) {
