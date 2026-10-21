@@ -3,6 +3,7 @@
   "appId": "1:351982862000:web:ccf85d1ffcd404143ec575",
   "apiKey": "AIzaSyBjHeM0WfZJiWb7HH5Zd9JXhLb2EbWxNUs",
   "authDomain": "gen-lang-client-0189013284.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-smartcalendarai-f1fd05a2-3285-4fbb-b412-01146dacda47",
   "storageBucket": "gen-lang-client-0189013284.firebasestorage.app",
   "messagingSenderId": "351982862000",
   "measurementId": "",

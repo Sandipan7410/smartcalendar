@@ -30,26 +30,59 @@ The model never changes the calendar on its own: every proposed event needs the 
 
 ## Tech stack
 
-React 19 · TypeScript · Vite · Tailwind CSS · Express · Google Gemini API (`@google/genai`) · Firebase Authentication · Google Calendar API · Open-Meteo · Vercel
+React 19 · TypeScript · Vite · Tailwind CSS · Vercel Functions / Express · Google Gemini API (`@google/genai`) · Firebase Authentication · Cloud Firestore · Google Calendar API · Open-Meteo
 
 ## Project structure
 
 ```text
-server.ts                         # /api/gemini/assistant, /api/gemini/analyze-schedule, /api/weather
-src/services/googleCalendar.ts    # Google Calendar sync
-src/services/weatherService.ts    # weather lookups
-src/utils/dateUtils.ts            # conflict checking
-src/components/views/             # day, week, month, year and agenda views
-src/components/ai/                # assistant drawer
+api/_lib/core.ts                  # Gemini prompts, model fallback, offline scheduler (server only)
+api/_lib/auth.ts                  # verifies the Firebase ID token on every AI request
+api/gemini/assistant.ts           # Vercel function → POST /api/gemini/assistant
+api/gemini/analyze-schedule.ts    # Vercel function → POST /api/gemini/analyze-schedule
+api/weather.ts                    # Vercel function → GET /api/weather
+server.ts                         # same routes for local dev (Express + Vite)
+src/services/firebase.ts          # Firebase app, Auth, Firestore (offline cache + live sync)
+src/services/googleAuth.ts        # Google sign-in, upgrades the guest account in place
+src/services/apiClient.ts         # attaches the Firebase ID token to /api calls
+firestore.rules                   # each user can only read/write their own data
 ```
 
-## Run it locally
+## Security model
 
-1. Install dependencies: `npm install`
-2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY` ([get a key](https://aistudio.google.com/apikey))
-3. Start the app: `npm run dev`, then open http://localhost:3000
+- **The Gemini API key lives only on the server** (`GEMINI_API_KEY` in Vercel env vars). The browser never sees it.
+- **AI endpoints require a Firebase sign-in.** Every visitor gets an anonymous Firebase account automatically; the browser sends its ID token and the server verifies it before calling Gemini, so nobody can drain your quota by calling the API directly.
+- **Firestore rules** restrict `/users/{uid}/…` to that user.
+- The Firebase web config in `firebase-applet-config.json` is public by design — restrict that browser key to your domains (below).
 
-The Gemini key is only read on the server, never sent to the browser.
+## Setup
+
+### 1. Firebase console (project `gen-lang-client-0189013284`)
+
+1. **Authentication → Sign-in method:** enable **Anonymous** and **Google**.
+2. **Authentication → Settings → Authorized domains:** add `smartcalendar-iota.vercel.app` (and any custom domain).
+3. **Firestore rules:** deploy with `npx firebase-tools deploy --only firestore:rules` (uses `firebase.json`, which targets the app's named database).
+
+### 2. Vercel → Project → Settings → Environment Variables
+
+| Name | Value |
+|---|---|
+| `GEMINI_API_KEY` | your key from https://aistudio.google.com/apikey |
+| `GEMINI_MODEL` | optional, e.g. a specific Gemini model name |
+
+**Delete `VITE_GEMINI_API_KEY` if it exists** — anything prefixed `VITE_` is bundled into public JavaScript. If it was ever set, create a new Gemini key and delete the old one.
+
+Redeploy after changing variables.
+
+### 3. Lock down the keys (Google Cloud console → APIs & Services → Credentials)
+
+- **Gemini key:** API restrictions → *Generative Language API* only. Optionally set a daily quota cap.
+- **Firebase browser key** (`AIzaSyBj…`): Application restrictions → *Websites* → your Vercel domain(s), `*.firebaseapp.com`, and `localhost` for development.
+
+### Run it locally
+
+1. `npm install`
+2. Copy `.env.example` to `.env` and set `GEMINI_API_KEY`
+3. `npm run dev`, then open http://localhost:3000 (add `localhost` to Firebase authorized domains)
 
 ## How it was built
 

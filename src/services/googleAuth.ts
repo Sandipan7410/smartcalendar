@@ -1,17 +1,16 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
-  getAuth,
   signInWithPopup,
+  linkWithPopup,
+  signInWithCredential,
   signOut,
   GoogleAuthProvider,
   onAuthStateChanged,
   User,
+  UserCredential,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
-
-// Initialize Firebase App singleton
-const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-export const auth = getAuth(app);
+// Reuse the single Firebase app/auth instance (and its named Firestore DB config).
+import { auth } from './firebase';
+export { auth };
 
 // Configure Google Auth Provider
 export const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
@@ -66,17 +65,42 @@ export const initAuth = (
 export const googleSignIn = async (): Promise<{
   user: ConnectedGoogleUser;
   accessToken: string;
+  /** True when we moved from the anonymous account to an existing Google account (different uid). */
+  switchedAccount: boolean;
 } | null> => {
   try {
     isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
+    const current = auth.currentUser;
+    let result: UserCredential;
+    let accessToken: string | undefined;
+    let switchedAccount = false;
 
-    if (!credential?.accessToken) {
+    if (current?.isAnonymous) {
+      // Upgrade the anonymous account in place so its saved events/tasks keep the same uid.
+      try {
+        result = await linkWithPopup(current, provider);
+      } catch (err: any) {
+        // This Google account already has its own Firebase user (e.g. used on another device).
+        if (err?.code === 'auth/credential-already-in-use' || err?.code === 'auth/email-already-in-use') {
+          const existing = GoogleAuthProvider.credentialFromError(err);
+          if (!existing) throw err;
+          accessToken = existing.accessToken;
+          result = await signInWithCredential(auth, existing);
+          switchedAccount = true;
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      result = await signInWithPopup(auth, provider);
+    }
+
+    accessToken = GoogleAuthProvider.credentialFromResult(result)?.accessToken || accessToken;
+    if (!accessToken) {
       throw new Error('Could not obtain Google OAuth access token. Please check permissions.');
     }
 
-    cachedAccessToken = credential.accessToken;
+    cachedAccessToken = accessToken;
 
     const userProfile: ConnectedGoogleUser = {
       uid: result.user.uid,
@@ -85,7 +109,7 @@ export const googleSignIn = async (): Promise<{
       photoURL: result.user.photoURL,
     };
 
-    return { user: userProfile, accessToken: cachedAccessToken };
+    return { user: userProfile, accessToken, switchedAccount };
   } catch (error: any) {
     console.error('Google Sign In Error:', error);
     throw error;
