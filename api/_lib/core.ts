@@ -67,13 +67,16 @@ export interface GeminiDiag {
 // Tried in order. Popular models sometimes return 503 "high demand", so keep several.
 const DEFAULT_MODELS = [
   'gemini-3.8-flash',
-  'gemini-3.5-flash',
+  'gemini-3.7-flash',
   'gemini-flash-latest',
+  'gemini-3.5-flash-lite',
+  'gemini-flash-lite-latest',
   'gemini-3.1-flash-lite',
-  'gemini-2.5-flash',
+  'gemini-3.6-flash',
 ];
-const PER_MODEL_TIMEOUT_MS = 15000;
-const TOTAL_BUDGET_MS = 40000;
+// Busy models usually answer 503 within a second or two; a slow one gets cut off so we move on.
+const PER_MODEL_TIMEOUT_MS = 9000;
+const TOTAL_BUDGET_MS = 45000;
 
 // Helper: Try calling Gemini with model fallback and proper timeout management
 async function callGeminiWithFallback(promptText: string, diag: GeminiDiag = { errors: [] }) {
