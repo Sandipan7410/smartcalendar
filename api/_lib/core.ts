@@ -386,6 +386,57 @@ function fallbackLocalAssistant(
   };
 }
 
+// ── Deterministic conflict check ────────────────────────────────────
+// Smaller Gemini models sometimes miss clashes, so every proposed event is
+// re-checked here against the user's calendar before it reaches the UI.
+const toMin = (t: string) => {
+  const [h, m] = String(t || '').split(':').map(Number);
+  return Number.isFinite(h) ? h * 60 + (Number.isFinite(m) ? m : 0) : NaN;
+};
+const toHHMM = (min: number) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+const to12h = (min: number) => {
+  const h = Math.floor(min / 60), m = min % 60;
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m ? `${h12}:${String(m).padStart(2, '0')} ${suffix}` : `${h12} ${suffix}`;
+};
+
+function enforceNoConflicts(parsed: any, events: any[]) {
+  const ev = parsed?.action?.type === 'CREATE_EVENT' ? parsed.action.event : null;
+  if (!ev || ev.isAllDay || !ev.startDate) return;
+  const start = toMin(ev.startTime), end = toMin(ev.endTime);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+
+  const sameDay = (events || []).filter(
+    (e: any) => e && !e.isAllDay && e.startDate === ev.startDate && Number.isFinite(toMin(e.startTime)) && Number.isFinite(toMin(e.endTime))
+  );
+  const overlaps = (s: number, f: number) => sameDay.filter((e: any) => s < toMin(e.endTime) && f > toMin(e.startTime));
+  const clash = overlaps(start, end);
+  if (!clash.length) return;
+
+  // Next free slot of the same length, in 30-minute steps, before midnight.
+  const duration = end - start;
+  let alt: number | null = null;
+  for (let s = Math.ceil(Math.max(...clash.map((e: any) => toMin(e.endTime))) / 30) * 30; s + duration <= 24 * 60; s += 30) {
+    if (!overlaps(s, s + duration).length) { alt = s; break; }
+  }
+
+  const first = clash[0];
+  parsed.conflicts = clash.map((e: any) => ({
+    eventTitle: e.title,
+    overlapTime: `${e.startTime} - ${e.endTime}`,
+    warning: 'Overlaps with your existing calendar event.',
+  }));
+  parsed.action = null;
+  if (alt !== null) {
+    parsed.suggestedSlots = [{ date: ev.startDate, startTime: toHHMM(alt), endTime: toHHMM(alt + duration), duration: `${duration} min` }];
+    parsed.reply = `You already have "${first.title}" from ${first.startTime}–${first.endTime}. I found ${to12h(alt)}–${to12h(alt + duration)} available. Would you like me to schedule ${ev.title || 'it'} there?`;
+  } else {
+    parsed.suggestedSlots = [];
+    parsed.reply = `You already have "${first.title}" from ${first.startTime}–${first.endTime}, and there's no free slot of that length later that day. Want to try another day?`;
+  }
+}
+
 /** POST /api/gemini/assistant */
 export async function runAssistant(requestBody: any): Promise<HandlerResult> {
   const req = { body: requestBody || {} };
@@ -548,6 +599,7 @@ Always respond in valid JSON format matching this schema:
       if (parsed.reply) {
         parsed.reply = checkAndFixWeatherDisclaimer(parsed.reply);
       }
+      enforceNoConflicts(parsed, events);
       res.json(parsed);
     } else {
       let replyText = responseText || "I've processed your request.";
