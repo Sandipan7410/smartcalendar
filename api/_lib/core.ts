@@ -58,34 +58,49 @@ function extractJSON(text: string): any {
   }
 }
 
+/** Records which model answered (or why none did) so the app can show it and you can debug it. */
+export interface GeminiDiag {
+  model?: string;
+  errors: string[];
+}
+
+// Tried in order. Popular models sometimes return 503 "high demand", so keep several.
+const DEFAULT_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-3.5-flash',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+];
+const PER_MODEL_TIMEOUT_MS = 15000;
+const TOTAL_BUDGET_MS = 40000;
+
 // Helper: Try calling Gemini with model fallback and proper timeout management
-async function callGeminiWithFallback(promptText: string) {
+async function callGeminiWithFallback(promptText: string, diag: GeminiDiag = { errors: [] }) {
   const currentKey = process.env.GEMINI_API_KEY || '';
   if (!currentKey) {
+    diag.errors.push('GEMINI_API_KEY is not set on the server');
     throw new Error('GEMINI_API_KEY is not configured');
   }
 
-  const client = new GoogleGenAI({
-    apiKey: currentKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  const client = new GoogleGenAI({ apiKey: currentKey });
 
   // GEMINI_MODEL lets you pin a model from the environment without a code change.
-  const defaults = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
-  const models = process.env.GEMINI_MODEL
-    ? [process.env.GEMINI_MODEL, ...defaults.filter((m) => m !== process.env.GEMINI_MODEL)]
-    : defaults;
+  const pinned = process.env.GEMINI_MODEL;
+  const models = pinned ? [pinned, ...DEFAULT_MODELS.filter((m) => m !== pinned)] : DEFAULT_MODELS;
+  const started = Date.now();
   let lastError: any = null;
 
   for (const model of models) {
-    let timer: NodeJS.Timeout | null = null;
+    const remaining = TOTAL_BUDGET_MS - (Date.now() - started);
+    if (remaining < 2000) {
+      diag.errors.push('stopped: time budget used up');
+      break;
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null;
     try {
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Timeout calling ${model}`)), 25000);
+        timer = setTimeout(() => reject(new Error(`timeout`)), Math.min(PER_MODEL_TIMEOUT_MS, remaining));
       });
 
       const apiCall = client.models.generateContent({
@@ -100,13 +115,16 @@ async function callGeminiWithFallback(promptText: string) {
       if (timer) clearTimeout(timer);
 
       if (response && response.text) {
+        diag.model = model;
         return response.text;
       }
+      diag.errors.push(`${model}: empty response`);
     } catch (err: any) {
       if (timer) clearTimeout(timer);
-      console.warn(`Model ${model} attempt failed:`, err?.message || err);
+      const msg = String(err?.message || err).replace(/\s+/g, ' ').slice(0, 160);
+      console.warn(`Model ${model} attempt failed:`, msg);
+      diag.errors.push(`${model}: ${msg}`);
       lastError = err;
-      // If error or timeout, continue to try fallback model
     }
   }
 
@@ -369,6 +387,7 @@ function fallbackLocalAssistant(
 export async function runAssistant(requestBody: any): Promise<HandlerResult> {
   const req = { body: requestBody || {} };
   const { res, out } = recorder();
+  const diag: GeminiDiag = { errors: [] };
   await (async () => {
   try {
     const { message, currentDate, currentTime, events = [], tasks = [], weather, history = [] } = req.body;
@@ -498,7 +517,7 @@ Always respond in valid JSON format matching this schema:
     let responseText = '';
     try {
       const fullPrompt = `System context:\n${systemPrompt}\n\nRecent conversation history:\n${JSON.stringify(history.slice(-4))}\n\nUser request:\n${message}`;
-      responseText = await callGeminiWithFallback(fullPrompt);
+      responseText = await callGeminiWithFallback(fullPrompt, diag);
     } catch (apiErr: any) {
       console.warn('Gemini API call failed, using intelligent local scheduler fallback:', apiErr?.message);
       const fallbackResult = fallbackLocalAssistant(message, currentDate, events, tasks, weather);
@@ -550,6 +569,11 @@ Always respond in valid JSON format matching this schema:
     }
   }
   })();
+  if (out.body && typeof out.body === 'object' && out.status === 200) {
+    // Tells the UI (and you, in the browser's Network tab) whether Gemini answered.
+    out.body.aiSource = diag.model ? `gemini:${diag.model}` : 'offline';
+    if (!diag.model && diag.errors.length) out.body.aiNote = diag.errors.join(' | ');
+  }
   return out;
 }
 
@@ -557,6 +581,7 @@ Always respond in valid JSON format matching this schema:
 export async function runAnalyzeSchedule(requestBody: any): Promise<HandlerResult> {
   const req = { body: requestBody || {} };
   const { res, out } = recorder();
+  const diag: GeminiDiag = { errors: [] };
   await (async () => {
   try {
     const { date, events = [] } = req.body;
@@ -578,7 +603,7 @@ Provide a JSON response:
 
     let responseText = '';
     try {
-      responseText = await callGeminiWithFallback(prompt);
+      responseText = await callGeminiWithFallback(prompt, diag);
     } catch (e) {
       // Local fallback summary
       const count = events.length;
@@ -605,6 +630,11 @@ Provide a JSON response:
     });
   }
   })();
+  if (out.body && typeof out.body === 'object' && out.status === 200) {
+    // Tells the UI (and you, in the browser's Network tab) whether Gemini answered.
+    out.body.aiSource = diag.model ? `gemini:${diag.model}` : 'offline';
+    if (!diag.model && diag.errors.length) out.body.aiNote = diag.errors.join(' | ');
+  }
   return out;
 }
 

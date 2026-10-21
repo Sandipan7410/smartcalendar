@@ -201,6 +201,13 @@ export const AIAssistantDrawer: React.FC = () => {
           tasks,
           payload.weather
         );
+        data.aiSource = 'offline';
+      }
+
+      // Be honest when Gemini didn't answer (busy, offline, or not signed in).
+      if (data?.aiSource === 'offline' && typeof data.reply === 'string') {
+        if (data.aiNote) console.warn('Gemini unavailable:', data.aiNote);
+        data.reply += '\n\n_(Offline assistant: Gemini is unavailable right now, please try again shortly.)_';
       }
 
       let autoExecuted = false;
