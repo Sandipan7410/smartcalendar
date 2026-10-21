@@ -449,3 +449,45 @@ export async function searchCities(query: string): Promise<CityLocation[]> {
       c.country.toLowerCase().includes(q)
   );
 }
+
+// Read cached weather forecast data
+export function getCachedWeatherForecast(): WeatherForecastData | null {
+  try {
+    const cached = localStorage.getItem(WEATHER_STORAGE_KEY);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (parsed && Array.isArray(parsed.forecastDays) && parsed.forecastDays.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return null;
+}
+
+// Format weather summary specifically for AI Assistant context and reasoning
+export function getWeatherContextSummary(weather?: WeatherForecastData | null): any {
+  const data = weather || getCachedWeatherForecast() || generateFallbackForecast(getSavedCity());
+  const city = data.location;
+  const locationStr = `${city.name}${city.region ? `, ${city.region}` : ''}${city.country ? `, ${city.country}` : ''}`;
+
+  return {
+    location: locationStr,
+    cityName: city.name,
+    currentTemp: `${data.currentTempF}°F (${data.currentTempC}°C)`,
+    currentCondition: data.currentCondition,
+    forecast: data.forecastDays.map((f) => ({
+      date: f.date,
+      dayName: f.dayName,
+      shortDate: f.shortDate,
+      condition: f.condition,
+      high: `${f.maxTempF}°F (${f.maxTempC}°C)`,
+      low: `${f.minTempF}°F (${f.minTempC}°C)`,
+      precipitationChance: `${f.precipitationProb}%`,
+      windSpeed: `${f.windSpeedKmH} km/h`,
+      suitability: `${f.suitability.label}: ${f.suitability.description}`,
+    })),
+  };
+}
+

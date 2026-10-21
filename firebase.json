@@ -1,0 +1,8 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-smartcalendarai-f1fd05a2-3285-4fbb-b412-01146dacda47",
+      "rules": "firestore.rules"
+    }
+  ]
+}

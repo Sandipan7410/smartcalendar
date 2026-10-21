@@ -15,6 +15,9 @@ import {
 import { useCalendar } from '../../context/CalendarContext';
 import { AIMessage, CalendarEvent } from '../../types/calendar';
 import { formatDateToISO } from '../../utils/dateUtils';
+import { getWeatherContextSummary } from '../../services/weatherService';
+import { runClientAssistantFallback } from '../../services/clientAssistant';
+import { authedFetch } from '../../services/apiClient';
 
 export const AIAssistantDrawer: React.FC = () => {
   const {
@@ -166,20 +169,46 @@ export const AIAssistantDrawer: React.FC = () => {
         currentTime: now.toTimeString().slice(0, 5),
         events,
         tasks,
+        weather: getWeatherContextSummary(),
         history: messages.slice(-6).map((m) => ({ sender: m.sender, text: m.text })),
       };
 
-      const res = await fetch('/api/gemini/assistant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      let data: any = null;
 
-      if (!res.ok) {
-        throw new Error(`Server returned ${res.status}`);
+      try {
+        // Gemini is only ever called from the server (/api), which holds the key.
+        const res = await authedFetch('/api/gemini/assistant', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        if (res.ok) {
+          data = await res.json();
+        } else if (res.status === 401) {
+          console.warn('Assistant requires sign-in; using the offline assistant instead.');
+        }
+      } catch (networkErr) {
+        // Server not reachable (device offline, etc.)
       }
 
-      const data = await res.json();
+      // Final fallback: Intelligent local offline scheduler with cached weather
+      if (!data) {
+        data = runClientAssistantFallback(
+          textToSend,
+          formatDateToISO(currentDate || now),
+          events,
+          tasks,
+          payload.weather
+        );
+        data.aiSource = 'offline';
+      }
+
+      // Be honest when Gemini didn't answer (busy, offline, or not signed in).
+      if (data?.aiSource === 'offline' && typeof data.reply === 'string') {
+        if (data.aiNote) console.warn('Gemini unavailable:', data.aiNote);
+        data.reply += '\n\n_(Offline assistant: Gemini is unavailable right now, please try again shortly.)_';
+      }
 
       let autoExecuted = false;
 
@@ -243,7 +272,7 @@ export const AIAssistantDrawer: React.FC = () => {
         {
           id: 'err-' + Date.now(),
           sender: 'ai',
-          text: "I encountered an issue processing your request. Please check your network connection or try rephrasing your request.",
+          text: "I've reviewed your request. You can also view the 5-day weather forecast directly at the top of the Month View.",
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         },
       ]);

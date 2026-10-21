@@ -24,6 +24,17 @@ import {
   updateGoogleEvent,
   deleteGoogleEvent,
 } from '../services/googleCalendar';
+import {
+  initAuthListener,
+  testFirestoreConnection,
+  saveEventToFirestore,
+  deleteEventFromFirestore,
+  saveTaskToFirestore,
+  deleteTaskFromFirestore,
+  subscribeToUserEvents,
+  subscribeToUserTasks,
+} from '../services/firebase';
+import { User as FirebaseUser } from 'firebase/auth';
 
 interface CalendarContextType {
   events: CalendarEvent[];
@@ -49,7 +60,8 @@ interface CalendarContextType {
   browserNotificationsAllowed: boolean;
   toasts: Array<{ id: string; title: string; message: string; type: 'info' | 'success' | 'warning' }>;
 
-  // Google Calendar Integration State
+  // Firebase & Google Calendar Integration State
+  firebaseUser: FirebaseUser | null;
   googleUser: ConnectedGoogleUser | null;
   isGoogleConnected: boolean;
   isSyncingGoogle: boolean;
@@ -200,7 +212,8 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
     Array<{ id: string; title: string; message: string; type: 'info' | 'success' | 'warning' }>
   >([]);
 
-  // Google Calendar Integration State
+  // Firebase & Google Calendar Integration State
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [googleUser, setGoogleUser] = useState<ConnectedGoogleUser | null>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.GOOGLE_USER);
@@ -212,6 +225,44 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
   const [isSyncingGoogle, setIsSyncingGoogle] = useState<boolean>(false);
   const [lastSyncedGoogleTime, setLastSyncedGoogleTime] = useState<Date | null>(null);
   const [googleSyncError, setGoogleSyncError] = useState<string | null>(null);
+
+  // Initialize Firebase connection and auth listener
+  useEffect(() => {
+    testFirestoreConnection();
+    const unsub = initAuthListener((u) => {
+      setFirebaseUser(u);
+    });
+    return () => unsub();
+  }, []);
+
+  // Sync with Firestore offline-persistent real-time database
+  useEffect(() => {
+    if (!firebaseUser) return;
+    const unsubEvents = subscribeToUserEvents(firebaseUser.uid, (cloudEvents, removedIds) => {
+      setEvents((prev) => {
+        const map = new Map<string, CalendarEvent>();
+        prev.forEach((e) => map.set(e.id, e));
+        cloudEvents.forEach((e) => map.set(e.id, e));
+        removedIds.forEach((id) => map.delete(id));
+        return Array.from(map.values());
+      });
+    });
+
+    const unsubTasks = subscribeToUserTasks(firebaseUser.uid, (cloudTasks, removedIds) => {
+      setTasks((prev) => {
+        const map = new Map<string, CalendarTask>();
+        prev.forEach((t) => map.set(t.id, t));
+        cloudTasks.forEach((t) => map.set(t.id, t));
+        removedIds.forEach((id) => map.delete(id));
+        return Array.from(map.values());
+      });
+    });
+
+    return () => {
+      unsubEvents();
+      unsubTasks();
+    };
+  }, [firebaseUser]);
 
   // Destructive delete confirmation modal
   const [confirmDeleteModal, setConfirmDeleteModal] = useState<{
@@ -345,6 +396,15 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
       setIsGoogleConnected(true);
       localStorage.setItem(STORAGE_KEYS.GOOGLE_USER, JSON.stringify(result.user));
 
+      // Signed into a Google account that already existed elsewhere: copy what was
+      // created on this device (as a guest) into that account so nothing is lost.
+      if (result.switchedAccount) {
+        events
+          .filter((e) => !e.isGoogleCalendar)
+          .forEach((e) => saveEventToFirestore(result.user.uid, e));
+        tasks.forEach((t) => saveTaskToFirestore(result.user.uid, t));
+      }
+
       showToast(
         'Google Calendar Connected',
         `Connected as ${result.user.displayName || result.user.email}. Syncing events...`,
@@ -443,6 +503,9 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
     }
 
     setEvents((prev) => [...prev, finalEvent]);
+    if (firebaseUser) {
+      saveEventToFirestore(firebaseUser.uid, finalEvent);
+    }
     return finalEvent;
   };
 
@@ -462,6 +525,9 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
     }
 
     setEvents((prev) => prev.map((ev) => (ev.id === updated.id ? updated : ev)));
+    if (firebaseUser) {
+      saveEventToFirestore(firebaseUser.uid, updated);
+    }
   };
 
   // Delete Event with Mandatory Confirmation for Google Calendar
@@ -508,6 +574,9 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
     if (selectedEventForPreview?.event.id === event.id) {
       setSelectedEventForPreview(null);
     }
+    if (firebaseUser) {
+      deleteEventFromFirestore(firebaseUser.uid, event.id);
+    }
     showToast('Event Deleted', `"${event.title}" removed from calendar.`, 'info');
   };
 
@@ -517,7 +586,11 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
         if (ev.id === id) {
           const nextState = !ev.isCompleted;
           if (nextState) sound.playTaskCompleteSound();
-          return { ...ev, isCompleted: nextState };
+          const updated = { ...ev, isCompleted: nextState };
+          if (firebaseUser) {
+            saveEventToFirestore(firebaseUser.uid, updated);
+          }
+          return updated;
         }
         return ev;
       })
@@ -545,18 +618,27 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
       createdAt: new Date().toISOString(),
     };
     setTasks((prev) => [newTask, ...prev]);
+    if (firebaseUser) {
+      saveTaskToFirestore(firebaseUser.uid, newTask);
+    }
     showToast('Task Added', `"${newTask.title}" added to tasks.`, 'success');
     return newTask;
   };
 
   const updateTask = (updated: CalendarTask) => {
     setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    if (firebaseUser) {
+      saveTaskToFirestore(firebaseUser.uid, updated);
+    }
     showToast('Task Updated', `"${updated.title}" updated.`, 'info');
   };
 
   const deleteTask = (id: string) => {
     const toDelete = tasks.find((t) => t.id === id);
     setTasks((prev) => prev.filter((t) => t.id !== id));
+    if (firebaseUser) {
+      deleteTaskFromFirestore(firebaseUser.uid, id);
+    }
     showToast('Task Deleted', `"${toDelete?.title || 'Task'}" removed.`, 'info');
   };
 
@@ -566,11 +648,15 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
         if (t.id === id) {
           const nextState = !t.isCompleted;
           if (nextState) sound.playTaskCompleteSound();
-          return {
+          const updated = {
             ...t,
             isCompleted: nextState,
             completedAt: nextState ? new Date().toISOString() : undefined,
           };
+          if (firebaseUser) {
+            saveTaskToFirestore(firebaseUser.uid, updated);
+          }
+          return updated;
         }
         return t;
       })
@@ -760,6 +846,7 @@ export const CalendarProvider: React.FC<{ children: ReactNode }> = ({ children }
         selectedEventForPreview,
         browserNotificationsAllowed,
         toasts,
+        firebaseUser,
         googleUser,
         isGoogleConnected,
         isSyncingGoogle,
